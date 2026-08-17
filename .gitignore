@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.js
+!esbuild.config.mjs
+!version-bump.mjs
+*.js.map
+*.d.ts
+.DS_Store
+.env
+data/
