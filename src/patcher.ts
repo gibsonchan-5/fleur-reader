@@ -1,109 +1,134 @@
-// Markdown 视图拦截 + 右键菜单
-// 同时支持「阅读视图」（rendered HTML）和「实时预览」（CodeMirror）
-import { Menu, Modal, Notice, MarkdownPostProcessor, MarkdownView } from 'obsidian';
+// Markdown 编辑器拦截 + 右键菜单 + 侵入式编辑
+// 支持 Live Preview 模式和 Reading Mode
+import { Menu, MarkdownView, Notice, Modal, TFile } from 'obsidian';
+import type { Editor } from 'obsidian';
 import type FleurReaderPlugin from './main';
-import type { Annotation } from './types';
 import { AIChatPanel } from './ai-chat-modal';
+import { wrapSelection, appendToSelection, findAndReplace, getReadingModeSelection, isInReadingMode, isInLivePreview } from './editor';
 
-type UnderlineStyle = 'solid' | 'dashed' | 'dotted' | 'wavy';
+/** 自定义批注输入弹窗 */
+class CommentModal extends Modal {
+  private textarea: HTMLTextAreaElement;
+  private onConfirm: (text: string) => void;
 
-/** 选区快照 */
-interface SelectionSnapshot {
-  text: string;
-  line: number;
-  timestamp: number;
+  constructor(
+    plugin: FleurReaderPlugin,
+    private previewText: string,
+    onConfirm: (text: string) => void
+  ) {
+    super(plugin.app);
+    this.onConfirm = onConfirm;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+
+    contentEl.createEl('h3', { text: '添加批注' });
+
+    // 显示选中文本预览
+    const preview = contentEl.createDiv();
+    preview.style.cssText = `
+      font-size: 13px; color: var(--text-muted);
+      background: var(--background-secondary);
+      padding: 8px 12px; border-radius: 6px;
+      margin-bottom: 12px; max-height: 60px;
+      overflow: hidden; line-height: 1.5;
+    `;
+    preview.textContent = this.previewText;
+
+    this.textarea = contentEl.createEl('textarea');
+    this.textarea.placeholder = '输入批注内容…';
+    this.textarea.style.cssText = `
+      width: 100%; min-height: 100px;
+      padding: 10px 12px;
+      border: 1px solid var(--background-modifier-border);
+      border-radius: 6px;
+      background: var(--background-primary);
+      color: var(--text-normal);
+      font-size: 14px; line-height: 1.5;
+      resize: vertical;
+      font-family: inherit;
+      box-sizing: border-box;
+    `;
+
+    const btnRow = contentEl.createDiv();
+    btnRow.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:12px;';
+
+    const cancelBtn = btnRow.createEl('button', { text: '取消' });
+    cancelBtn.style.cssText = `
+      padding: 6px 16px; border-radius: 6px; cursor: pointer;
+      border: 1px solid var(--background-modifier-border);
+      background: var(--background-primary);
+      color: var(--text-muted); font-size: 13px;
+    `;
+    cancelBtn.addEventListener('click', () => this.close());
+
+    const confirmBtn = btnRow.createEl('button', { text: '确定' });
+    confirmBtn.style.cssText = `
+      padding: 6px 16px; border-radius: 6px; cursor: pointer;
+      border: none;
+      background: var(--interactive-accent);
+      color: var(--text-on-accent); font-size: 13px;
+    `;
+    confirmBtn.addEventListener('click', () => {
+      const text = this.textarea.value.trim();
+      if (!text) return;
+      this.close();
+      this.onConfirm(text);
+    });
+
+    this.textarea.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+        confirmBtn.click();
+      }
+    });
+
+    setTimeout(() => this.textarea.focus(), 50);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
 }
 
 export class MarkdownPatcher {
-  boundContextMenu: ((e: MouseEvent) => void) | null = null;
-  boundMouseDown: ((e: MouseEvent) => void) | null = null;
-  boundMouseUp: ((e: MouseEvent) => void) | null = null;
-  private lastSnapshot: SelectionSnapshot | null = null;
+  private boundContextMenu: ((e: MouseEvent) => void) | null = null;
+  private boundClick: ((e: MouseEvent) => void) | null = null;
+  private boundMouseover: ((e: MouseEvent) => void) | null = null;
+  private boundMouseout: ((e: MouseEvent) => void) | null = null;
+
+  /** 当前悬浮的气泡 */
+  private tooltipEl: HTMLElement | null = null;
+  /** 当前气泡的隐藏定时器 */
+  private tooltipHideTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private plugin: FleurReaderPlugin) {}
 
   install() {
     this.boundContextMenu = (e: MouseEvent) => this.onContextMenu(e);
-    this.boundMouseDown = (e: MouseEvent) => this.onMouseDown(e);
-    this.boundMouseUp = (e: MouseEvent) => this.onMouseUp(e);
+    this.boundClick = (e: MouseEvent) => this.onClick(e);
+    this.boundMouseover = (e: MouseEvent) => this.onMouseOver(e);
+    this.boundMouseout = (e: MouseEvent) => this.onMouseOut(e);
 
     document.addEventListener('contextmenu', this.boundContextMenu, true);
-    document.addEventListener('mousedown', this.boundMouseDown, true);
-    document.addEventListener('mouseup', this.boundMouseUp, true);
-
-    // 注册 Markdown 后处理器，用于在阅读视图中恢复标注样式
-    this.plugin.registerMarkdownPostProcessor((el, ctx) => {
-      this.applyAnnotationsToElement(el, ctx.sourcePath);
-    });
+    document.addEventListener('click', this.boundClick, true);
+    document.addEventListener('mouseover', this.boundMouseover, true);
+    document.addEventListener('mouseout', this.boundMouseout, true);
 
     console.log('[FleurReader] Patcher installed');
   }
 
-  // ════════════════════════════════════════════
-  //  视图检测
-  // ════════════════════════════════════════════
-
-  private isInMarkdownView(target: EventTarget | null): boolean {
-    if (!target) return false;
-    const el = target as HTMLElement;
-    return !!el.closest?.(
-      '.markdown-reading-view, .markdown-preview-view, .markdown-source-view, ' +
-      '.workspace-leaf-content[data-type="markdown"]'
-    );
+  uninstall() {
+    if (this.boundContextMenu) document.removeEventListener('contextmenu', this.boundContextMenu, true);
+    if (this.boundClick) document.removeEventListener('click', this.boundClick, true);
+    if (this.boundMouseover) document.removeEventListener('mouseover', this.boundMouseover, true);
+    if (this.boundMouseout) document.removeEventListener('mouseout', this.boundMouseout, true);
+    this.removeTooltip();
   }
 
-  private isInReadingView(target: EventTarget | null): boolean {
-    if (!target) return false;
-    const el = target as HTMLElement;
-    return !!el.closest?.('.markdown-reading-view, .markdown-preview-view');
-  }
-
-  private isInLivePreview(target: EventTarget | null): boolean {
-    if (!target) return false;
-    const el = target as HTMLElement;
-    return !!el.closest?.('.cm-editor');
-  }
-
-  // ════════════════════════════════════════════
-  //  鼠标事件
-  // ════════════════════════════════════════════
-
-  private onMouseDown(_e: MouseEvent) {}
-
-  private onMouseUp(e: MouseEvent) {
-    if (e.button !== 0) return;
-    if (!this.isInMarkdownView(e.target)) return;
-
-    const selection = window.getSelection();
-    if (!selection || selection.isCollapsed) return;
-
-    const text = selection.toString().trim();
-    if (!text) return;
-
-    const line = this.getSelectionLine(selection);
-    this.lastSnapshot = { text, line, timestamp: Date.now() };
-
-    console.log('[FleurReader] Selection saved:', { text: text.substring(0, 60), line });
-  }
-
-  /** 从 Selection 对象获取行号 */
-  private getSelectionLine(selection: Selection): number {
-    const range = selection.getRangeAt(0);
-    const container = range.startContainer;
-    const el = container.nodeType === Node.TEXT_NODE
-      ? container.parentElement
-      : container as HTMLElement;
-    const blockEl = el?.closest?.('[data-line]');
-    if (blockEl) return parseInt(blockEl.getAttribute('data-line') || '0');
-
-    // live preview fallback: CodeMirror 行号
-    const cmLine = el?.closest?.('.cm-line');
-    if (cmLine) {
-      const lines = document.querySelectorAll('.cm-line');
-      const idx = Array.from(lines).indexOf(cmLine as Element);
-      if (idx >= 0) return idx;
-    }
-    return 0;
+  private getActiveView(): MarkdownView | null {
+    return this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
   }
 
   // ════════════════════════════════════════════
@@ -111,393 +136,426 @@ export class MarkdownPatcher {
   // ════════════════════════════════════════════
 
   private onContextMenu(e: MouseEvent) {
-    if (!this.isInMarkdownView(e.target)) return;
+    const inLivePreview = isInLivePreview(e.target);
+    const inReadingMode = isInReadingMode(e.target);
 
-    const selection = window.getSelection();
-    let selectedText = (selection && !selection.isCollapsed)
-      ? selection.toString().trim()
-      : '';
+    if (!inLivePreview && !inReadingMode) return;
 
-    let line = 0;
-    let source = '';
+    const view = this.getActiveView();
+    if (!view) return;
 
-    if (selectedText) {
-      source = 'live-selection';
-      line = this.getSelectionLine(selection!);
-    } else if (this.lastSnapshot && Date.now() - this.lastSnapshot.timestamp < 3000) {
-      source = 'snapshot';
-      selectedText = this.lastSnapshot.text;
-      line = this.lastSnapshot.line;
-    } else {
-      return;
+    let selection = '';
+
+    if (inLivePreview) {
+      const editor = view.editor;
+      if (!editor) return;
+      selection = editor.getSelection();
+    } else if (inReadingMode) {
+      selection = getReadingModeSelection() || '';
     }
 
-    console.log('[FleurReader] onContextMenu:', { source, text: selectedText.substring(0, 60), line });
+    if (!selection || selection.trim().length === 0) return;
 
     e.preventDefault();
-    e.stopPropagation();
 
-    this.showContextMenu(e.clientX, e.clientY, selectedText, line);
-  }
-
-  private showContextMenu(x: number, y: number, text: string, line: number) {
-    const s = this.plugin.settings;
     const menu = new Menu();
 
-    // 1. 高亮
     menu.addItem((item) => {
-      item.setTitle('高亮');
+      item.setTitle('添加高亮');
       item.setIcon('highlighter');
-      item.onClick(() => this.applyHighlight(text, line, s.highlightColor, 'highlight'));
+      item.onClick(() => this.addHighlight(selection, inLivePreview ? view.editor : null, inReadingMode));
     });
 
-    menu.addSeparator();
-
-    // 2. 划线
     menu.addItem((item) => {
-      item.setTitle('划线');
+      item.setTitle('添加划线');
       item.setIcon('underline');
-      item.onClick(() => this.applyUnderline(text, line, s.underlineStyle, s.underlineColor));
+      item.onClick(() => this.addUnderline(selection, inLivePreview ? view.editor : null, inReadingMode));
     });
 
-    menu.addSeparator();
-
-    // 3. 批注
     menu.addItem((item) => {
-      item.setTitle('批注');
+      item.setTitle('添加批注');
       item.setIcon('message-square');
-      item.onClick(() => this.showCommentDialog(text, line));
+      item.onClick(() => this.showCommentModal(selection, inLivePreview ? view.editor : null, inReadingMode));
     });
 
     menu.addSeparator();
 
-    // 4. 询问AI
     menu.addItem((item) => {
-      item.setTitle('询问AI');
-      item.setIcon('bot');
-      item.onClick(() => this.askAI(text));
+      item.setTitle('AI 解释');
+      item.setIcon('sparkles');
+      item.onClick(() => this.askAIExplain(selection, e.clientX, e.clientY));
     });
 
-    menu.addSeparator();
-
-    // 5. AI 翻译
     menu.addItem((item) => {
       item.setTitle('AI 翻译');
       item.setIcon('languages');
-      item.onClick(() => this.askAITranslate(text));
+      item.onClick(() => this.askAITranslate(selection, e.clientX, e.clientY));
     });
 
-    menu.showAtPosition({ x, y });
+    menu.addItem((item) => {
+      item.setTitle('询问AI');
+      item.setIcon('bot');
+      item.onClick(() => this.askAI(selection));
+    });
+
+    menu.showAtMouseEvent(e);
   }
 
   // ════════════════════════════════════════════
-  //  高亮
+  //  气泡提示（Reading Mode 悬浮显示批注）
   // ════════════════════════════════════════════
 
-  private async applyHighlight(
-    text: string, line: number, color: string, type: 'highlight' | 'comment'
-  ): Promise<string> {
+  private async onMouseOver(e: MouseEvent) {
+    if (!isInReadingMode(e.target)) return;
+
+    const target = e.target as HTMLElement;
+
+    // 查找最近的带有批注数据的元素
+    const annotatedEl = target.closest('[data-fleur-annotation]') as HTMLElement | null;
+    if (!annotatedEl) return;
+
+    const annotationId = annotatedEl.dataset['fleurAnnotation'];
+    if (!annotationId) return;
+
+    // 防止重复创建
+    if (this.tooltipEl) {
+      const existingId = this.tooltipEl.dataset['tooltipFor'];
+      if (existingId === annotationId) return;
+      this.removeTooltip();
+    }
+
+    // 加载批注数据
     const file = this.plugin.app.workspace.getActiveFile();
-    if (!file) return '';
+    if (!file) return;
 
-    const annotation: Annotation = {
-      id: this.plugin.generateId(),
-      type,
-      line,
-      text,
-      color,
-      createdAt: Date.now()
-    };
+    const data = await this.plugin.store.load(file.path);
+    const annotation = data.annotations.find(a => a.id === annotationId);
+    if (!annotation || !annotation.comment) return;
 
-    await this.plugin.store.addAnnotation(file.path, annotation);
-    this.plugin.sidebar?.refresh();
+    // 创建气泡
+    this.tooltipEl = document.body.createDiv('fleur-reader-tooltip');
+    this.tooltipEl.dataset['tooltipFor'] = annotationId;
+    this.tooltipEl.style.cssText = `
+      position: fixed;
+      z-index: 99999;
+      background: var(--background-secondary);
+      border: 1px solid var(--background-modifier-border);
+      border-radius: 8px;
+      padding: 10px 14px;
+      max-width: 320px;
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--text-normal);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.15s ease;
+    `;
+    this.tooltipEl.textContent = annotation.comment;
 
-    // 尝试立即在 DOM 上显示高亮样式
-    this.tryStyleInDOM(text, annotation);
+    // 定位到元素下方
+    const rect = annotatedEl.getBoundingClientRect();
+    this.tooltipEl.style.left = `${rect.left}px`;
+    this.tooltipEl.style.top = `${rect.bottom + 6}px`;
 
-    new Notice('已添加高亮');
-    return annotation.id;
+    document.body.appendChild(this.tooltipEl);
+    requestAnimationFrame(() => { this.tooltipEl!.style.opacity = '1'; });
+
+    // 如果气泡超出屏幕底部，翻到上方
+    const tooltipRect = this.tooltipEl.getBoundingClientRect();
+    if (tooltipRect.bottom > window.innerHeight - 10) {
+      this.tooltipEl.style.top = `${rect.top - tooltipRect.height - 6}px`;
+    }
   }
 
-  private async applyUnderline(
-    text: string, line: number, style: UnderlineStyle, color: string
-  ): Promise<string> {
-    const file = this.plugin.app.workspace.getActiveFile();
-    if (!file) return '';
+  private onMouseOut(e: MouseEvent) {
+    if (!isInReadingMode(e.target)) return;
 
-    const annotation: Annotation = {
-      id: this.plugin.generateId(),
-      type: 'underline',
-      line,
-      text,
-      color,
-      underlineStyle: style,
-      createdAt: Date.now()
-    };
+    const target = e.target as HTMLElement;
+    const annotatedEl = target.closest('[data-fleur-annotation]');
+    if (!annotatedEl) return;
 
-    await this.plugin.store.addAnnotation(file.path, annotation);
-    this.plugin.sidebar?.refresh();
-
-    this.tryStyleInDOM(text, annotation);
-
-    new Notice('已添加划线');
-    return annotation.id;
+    // 延迟隐藏，避免鼠标移动到气泡上就消失
+    if (this.tooltipHideTimer) clearTimeout(this.tooltipHideTimer);
+    this.tooltipHideTimer = setTimeout(() => {
+      // 检查鼠标是否还在气泡上
+      const related = e.relatedTarget as HTMLElement;
+      if (related && this.tooltipEl && this.tooltipEl.contains(related)) return;
+      this.removeTooltip();
+    }, 200);
   }
 
-  /** 尝试在当前 DOM 中立即应用样式（无需切换视图） */
-  private tryStyleInDOM(text: string, ann: Annotation) {
-    // 在 Markdown 渲染区域查找文本节点并包裹
-    const containers = document.querySelectorAll('.markdown-preview-view, .markdown-preview-sizer');
-    for (const container of Array.from(containers)) {
-      const found = this.findAndWrapText(container as HTMLElement, text, ann);
-      if (found) return;
+  private removeTooltip() {
+    if (this.tooltipHideTimer) {
+      clearTimeout(this.tooltipHideTimer);
+      this.tooltipHideTimer = null;
+    }
+    if (this.tooltipEl) {
+      this.tooltipEl.style.opacity = '0';
+      setTimeout(() => {
+        this.tooltipEl?.remove();
+        this.tooltipEl = null;
+      }, 150);
     }
   }
 
   // ════════════════════════════════════════════
-  //  批注对话框
+  //  点击处理
   // ════════════════════════════════════════════
 
-  private showCommentDialog(text: string, line: number) {
-    const hlColor = this.plugin.settings.highlightColor;
-
-    const modal = new Modal(this.plugin.app);
-    modal.titleEl.style.display = 'none';
-
-    const root = modal.contentEl.createDiv();
-    root.style.cssText = `
-      font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
-      max-width:480px;margin:0 auto;padding:20px 24px;
-    `;
-
-    const quoteBlock = root.createDiv();
-    quoteBlock.style.cssText = `
-      padding:12px 16px;margin-bottom:16px;
-      background:var(--background-secondary);
-      border-radius:4px;
-      position:relative;
-    `;
-    const quoteBar = quoteBlock.createDiv();
-    quoteBar.style.cssText = `
-      position:absolute;left:0;top:0;bottom:0;
-      width:3px;background:${hlColor};
-      border-radius:4px 0 0 4px;
-    `;
-    const quoteText = quoteBlock.createDiv();
-    quoteText.style.cssText = `
-      font-size:13.5px;line-height:1.65;
-      color:var(--text-normal);
-      font-style:italic;
-      letter-spacing:0.01em;
-      max-height:120px;overflow-y:auto;
-      word-break:break-word;
-    `;
-    quoteText.textContent = text;
-
-    const inputLabel = root.createDiv();
-    inputLabel.style.cssText = `
-      font-size:11.5px;font-weight:500;
-      color:var(--text-faint);
-      letter-spacing:0.05em;text-transform:uppercase;
-      margin-bottom:6px;
-    `;
-    inputLabel.textContent = '注释';
-
-    const textarea = root.createEl('textarea');
-    textarea.placeholder = '';
-    textarea.style.cssText = `
-      width:100%;min-height:90px;
-      padding:10px 12px;
-      border:1px solid var(--background-modifier-border);
-      border-radius:5px;
-      resize:vertical;
-      font-size:14px;line-height:1.6;
-      font-family:inherit;
-      color:var(--text-normal);
-      background:var(--background-primary);
-      outline:none;box-sizing:border-box;
-      transition:border-color 0.15s ease;
-    `;
-    textarea.addEventListener('focus', () => {
-      textarea.style.borderColor = 'var(--interactive-accent)';
-    });
-    textarea.addEventListener('blur', () => {
-      textarea.style.borderColor = 'var(--background-modifier-border)';
-    });
-
-    const btnRow = root.createDiv();
-    btnRow.style.cssText = `
-      display:flex;justify-content:flex-end;gap:8px;margin-top:16px;
-    `;
-
-    const cancelBtn = btnRow.createEl('button', { text: '取消' });
-    cancelBtn.style.cssText = `
-      font-size:13px;padding:6px 14px;
-      border-radius:5px;
-      border:1px solid var(--background-modifier-border);
-      background:transparent;
-      color:var(--text-muted);
-      cursor:pointer;font-family:inherit;
-    `;
-    cancelBtn.addEventListener('click', () => modal.close());
-
-    const saveBtn = btnRow.createEl('button', { text: '保存' });
-    saveBtn.style.cssText = `
-      font-size:13px;padding:6px 16px;
-      border-radius:5px;
-      border:none;
-      background:var(--interactive-accent);
-      color:var(--text-on-accent);
-      cursor:pointer;font-weight:500;font-family:inherit;
-      transition:opacity 0.15s ease;
-    `;
-
-    const doAdd = async () => {
-      const comment = textarea.value.trim();
-      if (!comment) { new Notice('批注内容不能为空'); return; }
-      modal.close();
-
-      const file = this.plugin.app.workspace.getActiveFile();
-      if (!file) return;
-
-      const annotation: Annotation = {
-        id: this.plugin.generateId(),
-        type: 'comment',
-        line,
-        text,
-        color: hlColor,
-        comment,
-        createdAt: Date.now()
-      };
-
-      await this.plugin.store.addAnnotation(file.path, annotation);
-      this.plugin.sidebar?.refresh();
-      new Notice('已添加批注');
-    };
-
-    saveBtn.addEventListener('click', doAdd);
-
-    textarea.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        doAdd();
+  private onClick(e: MouseEvent) {
+    const target = e.target as HTMLElement;
+    if (target.classList.contains('fleur-reader-delete')) {
+      e.preventDefault();
+      e.stopPropagation();
+      const annotationId = target.dataset['annotationId'];
+      if (annotationId) {
+        this.deleteAnnotation(annotationId);
       }
-      if (e.key === 'Escape') {
-        modal.close();
-      }
-    });
-
-    modal.open();
-    setTimeout(() => textarea.focus(), 100);
+    }
   }
 
   // ════════════════════════════════════════════
-  //  后处理器 — 阅读视图标注恢复
+  //  侵入式编辑
   // ════════════════════════════════════════════
 
-  async applyAnnotationsToElement(el: HTMLElement, sourcePath: string) {
-    const data = await this.plugin.store.load(sourcePath);
-    if (!data || data.annotations.length === 0) return;
+  private async addHighlight(selection: string, editor: Editor | null, inReadingMode: boolean) {
+    const file = this.plugin.app.workspace.getActiveFile();
+    if (!file) return;
 
-    data.annotations.forEach(ann => {
-      this.findAndWrapText(el, ann.text, ann);
+    if (inReadingMode) {
+      const content = await this.plugin.app.vault.read(file);
+      const updated = findAndReplace(content, selection, `==${selection}==`);
+      if (updated) {
+        await this.plugin.app.vault.modify(file, updated);
+        // 切回 Live Preview 让编辑器加载新内容
+        this.plugin.app.workspace.activeLeaf?.setViewState({
+          type: 'markdown',
+          state: { file: file.path, mode: 'source' }
+        });
+      }
+    } else if (editor) {
+      if (!wrapSelection(editor, '==', '==')) return;
+    }
+
+    await this.plugin.store.addAnnotation(file.path, {
+      id: this.plugin.generateId(),
+      type: 'highlight',
+      text: selection,
+      color: '#FFC107',
+      createdAt: Date.now(),
     });
+
+    this.plugin.sidebar?.refreshAnnotations();
+    new Notice('已添加高亮');
+  }
+
+  private async addUnderline(selection: string, editor: Editor | null, inReadingMode: boolean) {
+    const file = this.plugin.app.workspace.getActiveFile();
+    if (!file) return;
+
+    if (inReadingMode) {
+      const content = await this.plugin.app.vault.read(file);
+      const updated = findAndReplace(content, selection, `<u>${selection}</u>`);
+      if (updated) {
+        await this.plugin.app.vault.modify(file, updated);
+        this.plugin.app.workspace.activeLeaf?.setViewState({
+          type: 'markdown',
+          state: { file: file.path, mode: 'source' }
+        });
+      }
+    } else if (editor) {
+      if (!wrapSelection(editor, '<u>', '</u>')) return;
+    }
+
+    await this.plugin.store.addAnnotation(file.path, {
+      id: this.plugin.generateId(),
+      type: 'underline',
+      text: selection,
+      color: '#E8590C',
+      createdAt: Date.now(),
+    });
+
+    this.plugin.sidebar?.refreshAnnotations();
+    new Notice('已添加划线');
+  }
+
+  /** 显示批注输入弹窗 */
+  private showCommentModal(selection: string, editor: Editor | null, inReadingMode: boolean) {
+    const modal = new CommentModal(this.plugin, selection, async (comment) => {
+      await this.saveComment(selection, comment, editor, inReadingMode);
+    });
+    modal.open();
+  }
+
+  private async saveComment(selection: string, comment: string, editor: Editor | null, inReadingMode: boolean) {
+    const file = this.plugin.app.workspace.getActiveFile();
+    if (!file) return;
+
+    if (inReadingMode) {
+      const content = await this.plugin.app.vault.read(file);
+      // 批注 = 高亮 + 内联注释：==文本==%% 批注 %%
+      const wrapped = `==${selection}==%% ${comment} %%`;
+      const updated = findAndReplace(content, selection, wrapped);
+      if (updated) {
+        await this.plugin.app.vault.modify(file, updated);
+        this.plugin.app.workspace.activeLeaf?.setViewState({
+          type: 'markdown',
+          state: { file: file.path, mode: 'source' }
+        });
+      }
+    } else if (editor) {
+      // Live Preview: ==选中文本==%% 批注 %%
+      if (!wrapSelection(editor, '==', `==%% ${comment} %%`)) return;
+    }
+
+    await this.plugin.store.addAnnotation(file.path, {
+      id: this.plugin.generateId(),
+      type: 'comment',
+      text: selection,
+      color: '#FFC107',
+      comment: comment,
+      createdAt: Date.now(),
+    });
+
+    this.plugin.sidebar?.refreshAnnotations();
+    new Notice('已添加批注');
+  }
+
+  // ═══════════════════════════════════════════
+  //  AI 功能
+  // ═══════════════════════════════════════════
+
+  private askAIExplain(text: string, anchorX?: number, anchorY?: number) {
+    const panel = new AIChatPanel(this.plugin, text, 'explain');
+    panel.open(anchorX, anchorY);
+  }
+
+  private askAITranslate(text: string, anchorX?: number, anchorY?: number) {
+    const panel = new AIChatPanel(this.plugin, text, 'translate');
+    panel.open(anchorX, anchorY);
+  }
+
+  private askAI(text: string) {
+    const question = window.prompt('请输入你的问题：');
+    if (!question) return;
+
+    const queryText = `关于以下内容：\n\n"${text}"\n\n问题：${question}`;
+    const panel = new AIChatPanel(this.plugin, queryText, 'explain');
+    panel.open();
+  }
+
+  // ════════════════════════════════════════════
+  //  删除批注
+  // ════════════════════════════════════════════
+
+  private escapeRegex(text: string): string {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  /** 将文本拆分为词组，用 \s+ 连接，实现模糊空白匹配 */
+  private makeFuzzyPattern(text: string): string {
+    const parts = text.trim().split(/\s+/).map(p => this.escapeRegex(p));
+    return parts.join('\\s+');
+  }
+
+  async deleteAnnotation(annotationId: string) {
+    const file = this.plugin.app.workspace.getActiveFile();
+    if (!file) return;
+
+    const data = await this.plugin.store.load(file.path);
+    const annotation = data.annotations.find(a => a.id === annotationId);
+    if (!annotation) return;
+
+    // 优先用 Editor API（Live Preview），否则回退 vault.modify + 编辑器重新加载
+    const view = this.getActiveView();
+    const editor = view?.editor;
+
+    let updated: string | null = null;
+    let plainText = annotation.text;
+
+    if (editor) {
+      const content = editor.getValue();
+      updated = this.buildUnwrapRegex(content, annotation, plainText);
+      if (updated !== null && updated !== content) {
+        editor.setValue(updated);
+      }
+    } else {
+      const content = await this.plugin.app.vault.read(file);
+      updated = this.buildUnwrapRegex(content, annotation, plainText);
+      if (updated !== null && updated !== content) {
+        await this.plugin.app.vault.modify(file, updated);
+        // 切到 source 模式让编辑器加载新内容
+        this.plugin.app.workspace.activeLeaf?.setViewState({
+          type: 'markdown',
+          state: { file: file.path, mode: 'source' }
+        });
+      }
+    }
+
+    await this.plugin.store.deleteAnnotation(file.path, annotationId);
+    this.plugin.sidebar?.refreshAnnotations();
+    new Notice('已删除批注');
   }
 
   /**
-   * 在容器元素中查找与 annotation.text 匹配的文本节点，
-   * 将其拆分为子 span 并应用标注样式
+   * 用模糊匹配移除包裹标记，匹配失败时用精确匹配回退
    */
-  private findAndWrapText(container: HTMLElement, text: string, ann: Annotation): boolean {
-    if (!text.trim()) return false;
-    const cleaned = text.trim();
+  private unwrapFuzzy(content: string, wrappedPrefix: string, wrappedSuffix: string, annotationText: string): string {
+    // 先尝试模糊匹配（处理空白差异）
+    const parts = annotationText.trim().split(/\s+/).map(p => this.escapeRegex(p));
+    const fuzzyText = parts.join('[\\s\\u00a0]*');  // 用 [\s\u00a0]* 匹配任意空白（包括不可见空格）
+    const regex = new RegExp(`${this.escapeRegex(wrappedPrefix)}(${fuzzyText})${this.escapeRegex(wrappedSuffix)}`, 'g');
 
-    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null);
-    let textNode: Text | null;
+    const result = content.replace(regex, (_match, captured: string) => captured);
+    if (result !== content) return result;
 
-    while ((textNode = walker.nextNode() as Text | null)) {
-      const content = textNode.textContent || '';
-      if (!content.trim()) continue;
-
-      // 跳过已有标注样式的节点
-      if (textNode.parentElement?.dataset?.['fleurAnnId']) continue;
-
-      const idx = content.indexOf(cleaned);
-      if (idx === -1) continue;
-
-      // 找到了匹配
-      const full = content;
-      const before = full.substring(0, idx);
-      const middle = full.substring(idx, idx + cleaned.length);
-      const after = full.substring(idx + cleaned.length);
-
-      const parent = textNode.parentNode;
-      if (!parent) return false;
-
-      const span = document.createElement('span');
-      span.textContent = middle;
-      span.dataset['fleurAnnId'] = ann.id;
-      span.dataset['fleurType'] = ann.type;
-
-      this.applyAnnotationStyle(span, ann);
-
-      if (before) parent.insertBefore(document.createTextNode(before), textNode);
-      parent.insertBefore(span, textNode);
-      if (after) parent.insertBefore(document.createTextNode(after), textNode);
-      parent.removeChild(textNode);
-
-      return true;
-    }
-
-    return false;
+    // 回退：精确匹配（处理特殊情况）
+    const exactWrapped = `${wrappedPrefix}${annotationText}${wrappedSuffix}`;
+    return content.replace(exactWrapped, annotationText);
   }
 
-  /** 根据标注类型应用样式 */
-  private applyAnnotationStyle(span: HTMLElement, ann: Annotation) {
-    const color = ann.color || '#FFC107';
-    if (ann.type === 'highlight' || ann.type === 'comment') {
-      span.style.backgroundColor = color;
-      span.style.borderRadius = '2px';
-    } else if (ann.type === 'underline') {
-      const style = ann.underlineStyle || 'solid';
-      span.style.textDecoration = style === 'wavy'
-        ? `underline wavy ${color}`
-        : `underline ${style} ${color}`;
-      span.style.textUnderlineOffset = '3px';
+  /** 用模糊空白匹配构建正则，移除高亮/划线/批注包裹 */
+  private buildUnwrapRegex(content: string, annotation: { type: string; text: string; comment?: string }, _plainText: string): string | null {
+    if (annotation.type === 'highlight') {
+      return this.unwrapFuzzy(content, '==', '==', annotation.text);
     }
-  }
 
-  // ════════════════════════════════════════════
-  //  AI
-  // ════════════════════════════════════════════
-
-  private askAI(text: string) {
-    const panel = new AIChatPanel(this.plugin, text, 'explain');
-    panel.open();
-  }
-
-  private askAITranslate(text: string) {
-    const panel = new AIChatPanel(this.plugin, text, 'translate');
-    panel.open();
-  }
-
-  // ════════════════════════════════════════════
-  //  卸载
-  // ════════════════════════════════════════════
-
-  uninstall() {
-    if (this.boundContextMenu) {
-      document.removeEventListener('contextmenu', this.boundContextMenu, true);
-      this.boundContextMenu = null;
+    if (annotation.type === 'underline') {
+      const parts = annotation.text.trim().split(/\s+/).map(p => this.escapeRegex(p));
+      const fuzzyText = parts.join('[\\s\\u00a0]*');
+      const regex = new RegExp(`<u>[\\s\\u00a0]*(${fuzzyText})[\\s\\u00a0]*</u>`, 'g');
+      const r1 = content.replace(regex, (_m, c: string) => c);
+      if (r1 !== content) return r1;
+      // 回退：精确匹配
+      const exactWrapped = `<u>${annotation.text}</u>`;
+      return content.replace(exactWrapped, annotation.text);
     }
-    if (this.boundMouseDown) {
-      document.removeEventListener('mousedown', this.boundMouseDown, true);
-      this.boundMouseDown = null;
+
+    if (annotation.type === 'comment') {
+      const fuzzyComment = annotation.comment ? annotation.comment.trim().split(/\s+/).map(p => this.escapeRegex(p)).join('[\\s\\u00a0]*') : '';
+
+      if (fuzzyComment) {
+        const fuzzyText = this.makeFuzzyPattern(annotation.text).replace(/\\s\+/g, '[\\s\\u00a0]*');
+        // 带高亮的批注：==文本==%% 批注 %%
+        const regex1 = new RegExp(`==(${fuzzyText})==%%[\\s\\u00a0]*${fuzzyComment}[\\s\\u00a0]*%%`, 'g');
+        const r1 = content.replace(regex1, (_m, c: string) => c);
+        if (r1 !== content) return r1;
+        // 不带高亮的批注：文本%% 批注 %%
+        const regex2 = new RegExp(`(${fuzzyText})%%[\\s\\u00a0]*${fuzzyComment}[\\s\\u00a0]*%%`, 'g');
+        const r2 = content.replace(regex2, (_m, c: string) => c);
+        if (r2 !== content) return r2;
+        // 回退：精确匹配
+        const exact1 = `==${annotation.text}==%% ${annotation.comment} %%`;
+        const r3 = content.replace(exact1, annotation.text);
+        if (r3 !== content) return r3;
+        const exact2 = `${annotation.text}%% ${annotation.comment} %%`;
+        return content.replace(exact2, annotation.text);
+      }
+      // 无批注内容，只移除 %% 包裹
+      return this.unwrapFuzzy(content, '==%%', '%%', annotation.text);
     }
-    if (this.boundMouseUp) {
-      document.removeEventListener('mouseup', this.boundMouseUp, true);
-      this.boundMouseUp = null;
-    }
-    console.log('[FleurReader] Patcher uninstalled');
+
+    return content;
   }
 }

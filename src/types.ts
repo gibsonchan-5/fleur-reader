@@ -2,7 +2,7 @@
 export interface Annotation {
   id: string;
   type: 'highlight' | 'underline' | 'comment';
-  line: number;  // 行号（从0开始）
+  line?: number;  // 行号（从0开始）
   text: string;
   comment?: string;
   color?: string;

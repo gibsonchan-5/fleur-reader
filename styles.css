@@ -1,142 +1,220 @@
-/* FleurReader 侧边栏样式 */
-.fleur-reader-sidebar {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  overflow: hidden;
-}
+/* FleurReader 样式 - 完全对标 FleurPDF */
 
-.fleur-reader-toolbar {
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--background-modifier-border);
-  display: flex;
-  gap: 8px;
-}
-
-.fleur-reader-toolbar button {
-  padding: 6px 12px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 4px;
-  background: var(--interactive-normal);
-  color: var(--text-normal);
-  cursor: pointer;
-  font-size: 13px;
-  transition: all 0.2s;
-}
-
-.fleur-reader-toolbar button:hover {
-  background: var(--interactive-hover);
-  border-color: var(--interactive-accent);
-}
-
-.fleur-reader-annotations {
-  flex: 1;
-  overflow-y: auto;
-  padding: 12px 16px;
-}
-
-.fleur-reader-empty {
-  text-align: center;
-  padding: 40px 20px;
-  color: var(--text-muted);
+/* 侧边栏 */
+.fleur-sidebar {
+  padding: 12px;
   font-size: 14px;
 }
 
-.fleur-reader-annotation-card {
-  background: var(--background-secondary);
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 6px;
-  padding: 12px;
-  margin-bottom: 12px;
-  transition: all 0.2s;
-}
-
-.fleur-reader-annotation-card:hover {
-  border-color: var(--interactive-accent);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-}
-
-.fleur-reader-highlight {
-  border-left: 3px solid #ffd43b;
-}
-
-.fleur-reader-underline {
-  border-left: 3px solid #e8590c;
-}
-
-.fleur-reader-comment {
-  border-left: 3px solid #5b6abf;
-}
-
-.fleur-reader-card-header {
+.fleur-sidebar-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 8px;
-  font-size: 12px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
 }
 
-.fleur-reader-type-label {
-  color: var(--text-muted);
-  font-weight: 500;
-}
-
-.fleur-reader-time {
-  color: var(--text-faint);
-  font-size: 11px;
-}
-
-.fleur-reader-text {
-  background: var(--background-primary);
-  padding: 8px 10px;
-  border-radius: 4px;
-  margin-bottom: 8px;
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--text-normal);
-  border-left: 3px solid var(--background-modifier-border);
-}
-
-.fleur-reader-comment {
-  background: var(--background-primary-alt);
-  padding: 8px 10px;
-  border-radius: 4px;
-  margin-top: 8px;
-  font-size: 13px;
-  line-height: 1.5;
+.fleur-sidebar-title {
+  font-size: 16px;
+  font-weight: bold;
   color: var(--text-normal);
 }
 
-.fleur-reader-comment p {
-  margin: 0;
-}
-
-.fleur-reader-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 10px;
-}
-
-.fleur-reader-actions button {
-  padding: 4px 10px;
+.fleur-sidebar-search {
+  width: 100%;
+  margin-bottom: 12px;
+  padding: 6px 10px;
   border: 1px solid var(--background-modifier-border);
   border-radius: 4px;
-  background: var(--interactive-normal);
+  font-size: 13px;
+  background: var(--background-primary);
   color: var(--text-normal);
+}
+
+.fleur-sidebar-group {
+  margin-bottom: 12px;
+}
+
+.fleur-sidebar-page {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  padding: 4px 0;
+}
+
+.fleur-sidebar-item {
+  padding: 8px 10px;
+  margin-bottom: 4px;
+  border-radius: 4px;
+  background: var(--background-secondary);
   cursor: pointer;
+  transition: background 0.15s;
+}
+
+.fleur-sidebar-item:hover {
+  background: var(--background-modifier-hover);
+}
+
+.fleur-sidebar-text {
+  font-size: 13px;
+  color: var(--text-normal);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.fleur-sidebar-comment {
   font-size: 12px;
-  transition: all 0.2s;
+  color: var(--text-muted);
+  margin-top: 4px;
+  font-style: italic;
 }
 
-.fleur-reader-actions button:hover {
-  background: var(--interactive-hover);
-  border-color: var(--interactive-accent);
-}
-
-.fleur-reader-loading {
-  text-align: center;
+.fleur-sidebar-empty {
   padding: 20px;
+  text-align: center;
   color: var(--text-muted);
   font-size: 13px;
+}
+
+/* AI 对话框 */
+.fleur-ai-modal {
+  position: fixed;
+  right: 20px;
+  top: 80px;
+  width: 380px;
+  max-height: 70vh;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.fleur-ai-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+}
+
+.fleur-ai-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.fleur-ai-close {
+  background: none;
+  border: none;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 0;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: background 0.15s;
+}
+
+.fleur-ai-close:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.fleur-ai-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.fleur-ai-message {
+  padding: 10px 14px;
+  border-radius: 8px;
+  line-height: 1.5;
+  max-width: 85%;
+  word-wrap: break-word;
+}
+
+.fleur-ai-message.user {
+  align-self: flex-end;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  width: fit-content;
+}
+
+.fleur-ai-message.assistant {
+  align-self: flex-start;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+}
+
+.fleur-ai-input-area {
+  display: flex;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+}
+
+.fleur-ai-input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 14px;
+  resize: none;
+}
+
+.fleur-ai-send-btn {
+  padding: 0;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 6px;
+  background: var(--background-primary);
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  transition: box-shadow 0.15s;
+}
+
+.fleur-ai-send-btn:hover {
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.15);
+  color: var(--text-normal);
+}
+
+.fleur-ai-send-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* 错误提示 */
+.fleur-ai-modal h2 {
+  margin-bottom: 16px;
+}
+
+.fleur-ai-error {
+  color: var(--text-error) !important;
 }
