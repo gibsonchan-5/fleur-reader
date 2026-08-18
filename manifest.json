@@ -1,7 +1,7 @@
 {
 	"id": "fleur-reader",
 	"name": "FleurReader",
-	"version": "1.0.1",
+	"version": "1.0.2",
 	"minAppVersion": "1.0.0",
 	"description": "Markdown 智能阅读与标注插件，支持高亮、划线、AI 批注与翻译",
 	"author": "gibsonchan-5",

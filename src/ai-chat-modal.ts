@@ -26,6 +26,30 @@ export class AIChatPanel {
   private dragOffsetY = 0;
   private isResizing = false;
 
+  private static readonly POS_KEY = 'fleur-reader-ai-panel-pos';
+
+  private static getSavedPos(): { left: number; top: number } | null {
+    try {
+      const raw = localStorage.getItem(AIChatPanel.POS_KEY);
+      if (!raw) return null;
+      const pos = JSON.parse(raw);
+      if (typeof pos.left === 'number' && typeof pos.top === 'number') {
+        // 验证坐标仍在屏幕范围内
+        if (pos.left >= 0 && pos.left < window.innerWidth - 100 &&
+            pos.top >= 0 && pos.top < window.innerHeight - 100) {
+          return pos;
+        }
+      }
+    } catch { /* ignore */ }
+    return null;
+  }
+
+  private static savePos(left: number, top: number) {
+    try {
+      localStorage.setItem(AIChatPanel.POS_KEY, JSON.stringify({ left, top }));
+    } catch { /* ignore */ }
+  }
+
   constructor(
     private plugin: FleurReaderPlugin,
     private selectedText: string,
@@ -67,7 +91,12 @@ export class AIChatPanel {
     let left: number;
     let top: number;
 
-    if (anchorX !== undefined && anchorY !== undefined) {
+    // 优先级：上次保存的位置 > 鼠标位置 > 默认位置
+    const saved = AIChatPanel.getSavedPos();
+    if (saved) {
+      left = saved.left;
+      top = saved.top;
+    } else if (anchorX !== undefined && anchorY !== undefined) {
       // 优先在鼠标右侧打开，空间不够则放左侧
       if (anchorX + panelWidth + 20 < window.innerWidth) {
         left = anchorX + 20;
@@ -284,6 +313,10 @@ export class AIChatPanel {
     this.isDragging = false;
     document.removeEventListener('mousemove', this.onDragMove);
     document.removeEventListener('mouseup', this.onDragEnd);
+    if (this.panelEl) {
+      const rect = this.panelEl.getBoundingClientRect();
+      AIChatPanel.savePos(rect.left, rect.top);
+    }
   };
 
   private onResizeStart(e: MouseEvent) {
@@ -306,6 +339,10 @@ export class AIChatPanel {
       this.isResizing = false;
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
+      if (this.panelEl) {
+        const rect = this.panelEl.getBoundingClientRect();
+        AIChatPanel.savePos(rect.left, rect.top);
+      }
     };
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
